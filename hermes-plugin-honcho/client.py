@@ -265,6 +265,39 @@ def _env_base_url() -> str | None:
     return (get_secret("HONCHO_BASE_URL", "") or "").strip() or (get_secret("HONCHO_URL", "") or "").strip() or None
 
 
+_ROOT_SOCKET_PATH = object()  # sentinel: socketPath set at the root, where it is not accepted
+
+
+def _raw_socket_path(raw: dict, host_block: dict) -> Any:
+    """The host block's ``socketPath`` as written (validated at client build), or None when unset.
+
+    Host-local only: a socket path names one local route for one identity, so it is never
+    inherited from the root. A root-level value is kept as a sentinel that the build rejects,
+    instead of being ignored (ignoring it would silently fall back to TCP).
+    """
+    value = host_block.get("socketPath")
+    if value is None or value == "":
+        return _ROOT_SOCKET_PATH if raw.get("socketPath") not in (None, "") else None
+    return value
+
+
+def _validated_socket_path(config: HonchoClientConfig) -> str:
+    """The configured Unix socket path, or ValueError. Never returns a fallback."""
+    value = config.socket_path
+    if value is _ROOT_SOCKET_PATH:
+        raise ValueError("Honcho socketPath is host-local: set it on hosts.<host> in honcho.json, not at the root")
+    if not isinstance(value, str) or "\x00" in value or not os.path.isabs(value):
+        raise ValueError(f"Honcho socketPath must be an absolute filesystem path, got {value!r}")
+    base_url = config.base_url or ""
+    if urlparse(base_url).scheme != "http" or not _is_local_base_url(base_url):
+        raise ValueError("Honcho socketPath requires an explicit local http baseUrl (for example "
+                         f"http://localhost); got {base_url!r}")
+    if isinstance(_host_block(config.raw or {}, config.host).get("oauth"), dict):
+        raise ValueError("Honcho socketPath cannot be combined with an OAuth grant: token refresh would "
+                         "leave the socket route")
+    return value
+
+
 def _connection_fields(look: _HostLookup, host: str, path: Path) -> dict[str, Any]:
     """Resolve identity/credential/transport fields (host block -> root -> env)."""
     raw, host_block = look.raw, look.host
@@ -287,6 +320,7 @@ def _connection_fields(look: _HostLookup, host: str, path: Path) -> dict[str, An
         "api_key": api_key,
         "environment": look.pick("environment", "production"),
         "base_url": base_url,
+        "socket_path": _raw_socket_path(raw, host_block),
         "timeout": _resolve_optional_float(*look.vals("timeout", "requestTimeout"), os.environ.get("HONCHO_TIMEOUT")),
         # Explicit enabled (host, then root) wins; else auto-enable on key/url.
         "enabled": _first_set(*look.vals("enabled"), default=bool(api_key or base_url)),
@@ -348,6 +382,8 @@ class HonchoClientConfig:
     environment: str = "production"
     base_url: str | None = None  # self-hosted override of the environment mapping
     timeout: float | None = None  # SDK HTTP timeout, seconds
+    # hosts.<host>.socketPath: send every request over this Unix socket (no TCP fallback).
+    socket_path: str | None = None
     # Identity
     peer_name: str | None = None
     ai_peer: str = "hermes"
@@ -577,11 +613,16 @@ def close_honcho_clients() -> None:
     with _client_slots_lock:
         slots = list(_client_slots.values())
         _client_slots.clear()
+        owned = list(_owned_http_clients.values())
+        _owned_http_clients.clear()
     for slot in slots:
         close = getattr(getattr(slot.peek(), "_http", None), "close", None)
         if callable(close):
             with contextlib.suppress(Exception):
                 close()
+    for http_client in owned:  # socket-route transports: the SDK's close() skips an injected client
+        with contextlib.suppress(Exception):
+            http_client.close()
 
 
 _exit_close_registered = False
@@ -711,7 +752,38 @@ def _build_client(config: HonchoClientConfig) -> "Honcho":
         import re
         kwargs["base_url"] = re.sub(r"/v\d+/*$", "", base_url).rstrip("/")
     _register_exit_close()
-    return Honcho(**kwargs)
+    if config.socket_path is None:
+        return Honcho(**kwargs)
+    # Unix socket route: validate first so a bad value fails closed, never falls back to TCP.
+    socket_path = _validated_socket_path(config)
+    import httpx
+    # trust_env=False: proxy env vars would otherwise mount a TCP proxy transport over the socket.
+    http_client = httpx.Client(transport=httpx.HTTPTransport(uds=socket_path), timeout=httpx.Timeout(timeout),
+                               trust_env=False)
+    logger.info("Honcho client uses Unix socket %s (workspace: %s)", socket_path, config.workspace_id)
+    try:
+        client = Honcho(**kwargs, http_client=http_client)
+    except BaseException:
+        http_client.close()
+        raise
+    # The SDK does not close an injected http_client, so this module owns it: closed at process exit,
+    # or when the Honcho client is garbage-collected (no leak on credential churn).
+    with _client_slots_lock:
+        _owned_http_clients[id(http_client)] = http_client
+    weakref.finalize(client, _release_owned_http_client, id(http_client))
+    return client
+
+
+# id -> httpx.Client built for a socket route; see close_honcho_clients.
+_owned_http_clients: dict[int, Any] = {}
+
+
+def _release_owned_http_client(key: int) -> None:
+    with _client_slots_lock:
+        http_client = _owned_http_clients.pop(key, None)
+    if http_client is not None:
+        with contextlib.suppress(Exception):
+            http_client.close()
 
 
 def reset_honcho_client() -> None:

@@ -81,8 +81,8 @@ def _ambient_host_block() -> tuple[dict | None, dict]:
 
 def _client_cache_key(config: HonchoClientConfig | None) -> tuple:
     """Cache identity for a Honcho client build. Explicit configs key on connection identity,
-    provenance paths, effective timeout, and the credential fingerprint (the access token itself
-    is NOT in the key — in-place rotation must stay within one slot). Ambient callers
+    provenance paths, effective timeout, the credential fingerprint, and the socketPath (the access
+    token itself is NOT in the key — in-place rotation must stay within one slot). Ambient callers
     (config=None) key on what from_global_config() would resolve."""
     from .client import resolve_active_host, resolve_config_path
 
@@ -90,9 +90,31 @@ def _client_cache_key(config: HonchoClientConfig | None) -> tuple:
         return ("explicit", config.host, config.workspace_id, config.base_url or "", config.environment,
                 str(config.config_path) if config.config_path is not None else "",
                 str(config.hermes_home) if config.hermes_home is not None else "",
-                _resolve_timeout_from_sources(config), _credential_fingerprint(config))
+                _resolve_timeout_from_sources(config), _credential_fingerprint(config),
+                _socket_identity(config.socket_path))
     return ("ambient", str(resolve_config_path()), resolve_active_host(),
-            _resolve_timeout_from_sources(None), _credential_fingerprint(None))
+            _resolve_timeout_from_sources(None), _credential_fingerprint(None), _ambient_socket_identity())
+
+
+def _socket_identity(value) -> str:
+    """Cache-key form of a configured socketPath: '' when unset, else a stable repr (malformed
+    values included, so a changed value always rebuilds and is re-validated)."""
+    from .client import _ROOT_SOCKET_PATH
+
+    if value is None:
+        return ""
+    return "<root>" if value is _ROOT_SOCKET_PATH else repr(value)
+
+
+def _ambient_socket_identity() -> str:
+    """socketPath the ambient profile would resolve (see client._raw_socket_path)."""
+    from .client import _raw_socket_path
+
+    try:
+        raw, block = _ambient_host_block()
+        return "" if raw is None else _socket_identity(_raw_socket_path(raw, block))
+    except Exception:
+        return "<unreadable>"
 
 
 def _slot_identity(key: tuple) -> tuple:
