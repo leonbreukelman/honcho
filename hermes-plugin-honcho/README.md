@@ -189,6 +189,7 @@ For every key, resolution order is: **host block > root > env var > default**.
 | `apiKey` | string | — | API key. Falls back to `HONCHO_API_KEY` env var. When connected via OAuth, holds the auto-refreshing access token instead |
 | `oauth` | object | — | OAuth grant (refresh token, expiry, client, token endpoint). Written by the Connect/sign-in flows and rotated automatically — not hand-edited. Optional: an API key alone works without it |
 | `baseUrl` | string | — | Base URL for self-hosted Honcho. Local URLs auto-skip API key auth |
+| `socketPath` | string | — | Host block only. Absolute path of a Unix socket that reaches a self-hosted Honcho (for example a per-user `systemd-socket-proxyd` route). Every request goes over this socket; there is no TCP fallback. Requires a local `http` `baseUrl` such as `http://localhost`, which then only sets the Host header. A malformed value, a root-level value, or a combination with `oauth` disables the client instead of falling back |
 | `environment` | string | `"production"` | SDK environment mapping |
 | `enabled` | bool | auto | Master toggle. Auto-enables when `apiKey` or `baseUrl` present |
 | `workspace` | string | host key | Honcho workspace ID. Shared environment — all profiles in the same workspace can see the same user identity and related memories |

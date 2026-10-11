@@ -138,3 +138,53 @@ def _no_leaked_writer_threads():
         f"leaked honcho-async-writer threads: {len(leaked)} - "
         "call manager.shutdown() (use the make_manager fixture)"
     )
+
+
+# --- hosts.<host>.socketPath tests (test_socket_path.py) -----------------------------------------
+# They load the plugin under its own package name and run real Unix-socket servers plus a TCP
+# "canary" listener, so that module opts out of the network guard (pytestmark allow_network).
+
+SOCKET_PACKAGE = "hermes_plugin_honcho_under_test"
+
+
+@pytest.fixture(scope="session")
+def plugin():
+    try:
+        import hermes_cli  # noqa: F401
+    except ImportError:
+        pytest.skip("Hermes Agent is not importable; put a Hermes checkout on PYTHONPATH")
+    if SOCKET_PACKAGE not in sys.modules:
+        spec = importlib.util.spec_from_file_location(SOCKET_PACKAGE, _PLUGIN_DIR / "__init__.py",
+                                                      submodule_search_locations=[str(_PLUGIN_DIR)])
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[SOCKET_PACKAGE] = module
+        spec.loader.exec_module(module)
+    return sys.modules[SOCKET_PACKAGE]
+
+
+@pytest.fixture
+def hermes_home(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("HONCHO_API_KEY", "HONCHO_BASE_URL", "HONCHO_URL", "HONCHO_TIMEOUT", "HERMES_HONCHO_HOST",
+                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY",
+                "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    return home
+
+
+@pytest.fixture
+def client_mod(plugin, hermes_home):
+    mod = sys.modules[f"{SOCKET_PACKAGE}.client"]
+    mod.reset_honcho_client()
+    yield mod
+    mod.close_honcho_clients()
+    mod.reset_honcho_client()
+
+
+@pytest.fixture
+def cache_mod(plugin):
+    return sys.modules[f"{SOCKET_PACKAGE}.client_cache"]
