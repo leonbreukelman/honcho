@@ -43,9 +43,17 @@ _INTERNAL_GATEWAY_TURN_RE = re.compile(
     r"\[CONTEXT SUMMARY\]:?|"
     r"\[PRIOR CONTEXT[^\]]*\]|"
     r"\[Your active task list was preserved across context compression\]|"
-    r"\[IMPORTANT: Background process \d+ matched watch pattern[^\n]*|"
+    # Background-process notices (tools/process_registry_notifications.py, gateway/run_notifications.py):
+    # completion, watch match, watch disabled, and the coalesced process / subagent batches.
+    r"\[IMPORTANT: Background process |"
+    r"\[IMPORTANT: \d+ background (?:process(?:es)?|subagent delegations?)\b|"
+    r"\[IMPORTANT: Watch patterns disabled for process |"
     r"A background fan-out of \d+ subagent\(s\) you dispatched earlier has finished\.|"
     r"A background subagent you dispatched earlier has finished\.|"
+    # Cron output delivered into a chat (cron/scheduler_delivery.py: "scheduled job, not the user").
+    r"\[Cronjob |"
+    # Agent-to-agent packets addressed to aos on the owner's channel (team convention, no core marker).
+    r"AOS-BOUND \| |"
     # Kanban dispatcher prompt that starts every worker run (hermes_cli/kanban_db_dispatch.py).
     r"work kanban task t_[0-9a-z]+\b|"
     # Kanban notices: the gateway wake turn ("[kanban] Task t_x completed.") and the TUI poller / ping
@@ -68,6 +76,47 @@ def _is_kanban_worker() -> bool:
     """A Kanban worker run: the dispatcher sets HERMES_KANBAN_TASK. Its turns come from the
     dispatcher and the worker's own loop, not from the human, so they are never the user's words."""
     return bool(os.environ.get("HERMES_KANBAN_TASK", "").strip())
+
+
+# Session sources a machine starts (core labels the session row with agent.session_source.session_source_for;
+# agent.prompt_caching.MACHINE_PACED_SOURCES is core's own list). A child process inherits its parent's
+# HERMES_SESSION_SOURCE (the terminal tool bridges it, while it strips HERMES_KANBAN_TASK), and a
+# `hermes chat -q` run is labelled "oneshot", so a fresh session a worker launches still carries the marker.
+_MACHINE_SOURCES = frozenset({
+    "kanban", "cron", "oneshot", "subagent", "webhook", "api", "tool", "batch", "a2a", "flush",
+})
+
+
+def _machine_origin(platform: Optional[str], agent_context: Optional[str] = "") -> str:
+    """Why this session was started by a machine, or "" for a session a person drives.
+
+    One rule on the session origin, decided once per session: never store a machine-started session's
+    turns as the user's words. Fails closed: when the origin cannot be read, the session counts as machine."""
+    if _is_kanban_worker():
+        return "kanban-worker"
+    context = str(agent_context or "").strip().lower()
+    if context and context != "primary":  # core: "cron" (scheduler), "subagent" (delegate_task), "flush"
+        return f"agent_context={context}"
+    if os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT", "").strip():
+        return "delegated-child"
+    raw_platform = str(platform or "").strip().lower()
+    if raw_platform in _MACHINE_SOURCES:
+        return f"platform={raw_platform}"
+    try:
+        from agent.session_source import session_source_for
+        source = str(session_source_for(raw_platform or "cli") or "").strip().lower()
+    except Exception as e:  # core without the origin vocabulary: the marker is not readable
+        logger.debug("Honcho cannot read the session origin (%s); treating it as machine-started", e)
+        return "origin-unknown"
+    machine = set(_MACHINE_SOURCES)
+    with contextlib.suppress(Exception):
+        from agent.prompt_caching import MACHINE_PACED_SOURCES
+        machine |= {str(s).lower() for s in MACHINE_PACED_SOURCES}
+    if not source:
+        return "origin-unknown"
+    if source in machine:
+        return f"source={source}"
+    return ""
 
 
 def _cfg_usable(cfg) -> bool:
@@ -193,6 +242,9 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         self._init_peer_platform: str = "cli"
         self._init_peer_notice_emitted = False
         self._cron_skipped = False  # cron and flush contexts disable the plugin entirely
+        # Set by initialize() from the session origin; "" means a person drives this session. Until then the
+        # origin is unknown, and sync_turn stores nothing (fail closed).
+        self._machine_origin: str = "not-initialized"
 
     @property
     def name(self) -> str:
@@ -236,6 +288,10 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         self._recall_generation = object()
         try:
             agent_context, platform = kwargs.get("agent_context", ""), kwargs.get("platform", "cli")
+            self._machine_origin = _machine_origin(platform, agent_context)
+            if self._machine_origin:
+                logger.debug("Honcho: machine-started session (%s); turns are not stored as the user's words",
+                             self._machine_origin)
             if agent_context in {"cron", "flush"} or platform == "cron":
                 logger.debug("Honcho skipped: cron/flush context (agent_context=%s, platform=%s)",
                              agent_context, platform)
@@ -794,6 +850,9 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             return
         if _is_kanban_worker():
             logger.debug("Honcho sync skipped a Kanban worker turn (dispatcher-authored, not the user's words)")
+            return
+        if self._machine_origin:
+            logger.debug("Honcho sync skipped a turn of a machine-started session (%s)", self._machine_origin)
             return
         if not self._ready_or_kick_init():
             return
