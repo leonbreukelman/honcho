@@ -48,6 +48,8 @@ _INTERNAL_GATEWAY_TURN_RE = re.compile(
     r"\[IMPORTANT: Background process |"
     r"\[IMPORTANT: \d+ background (?:process(?:es)?|subagent delegations?)\b|"
     r"\[IMPORTANT: Watch patterns disabled for process |"
+    r"\[IMPORTANT: Watch-pattern (?:overflow|notifications resumed)|"
+    r"\[Background process \S+ heartbeat #|"
     r"A background fan-out of \d+ subagent\(s\) you dispatched earlier has finished\.|"
     r"A background subagent you dispatched earlier has finished\.|"
     # Cron output delivered into a chat (cron/scheduler_delivery.py: "scheduled job, not the user").
