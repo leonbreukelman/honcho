@@ -89,11 +89,45 @@ _MACHINE_SOURCES = frozenset({
 })
 
 
+# Surfaces where a person types the turn. Core vocabulary first: agent.session_source.ATTENDED_SOURCES
+# (cli, tui, desktop, acp) and the gateway's built-in messaging platforms (gateway.config.Platform), minus
+# the gateway transports that machines drive. "voice" is this deployment's phone bridge (Leon speaking).
+# Everything else (unknown, plugin-registered or future sources) is not an owner surface: fail closed.
+_ATTENDED_FALLBACK = frozenset({"cli", "tui", "desktop", "acp"})
+_MESSAGING_FALLBACK = frozenset({
+    "telegram", "discord", "whatsapp", "whatsapp_cloud", "slack", "signal", "mattermost", "matrix", "email",
+    "sms", "dingtalk", "feishu", "wecom", "weixin", "bluebubbles", "qqbot", "yuanbao",
+})
+_MACHINE_TRANSPORTS = frozenset({"local", "api_server", "webhook", "msgraph_webhook", "wecom_callback", "relay"})
+_DEPLOYMENT_OWNER_SURFACES = frozenset({"voice"})
+
+
+def _owner_surfaces() -> frozenset:
+    attended = set(_ATTENDED_FALLBACK)
+    with contextlib.suppress(Exception):
+        from agent.session_source import ATTENDED_SOURCES
+        attended = {str(s).lower() for s in ATTENDED_SOURCES}
+    messaging = set(_MESSAGING_FALLBACK)
+    with contextlib.suppress(Exception):
+        from gateway.config import Platform
+        messaging = {str(p.value).lower() for p in Platform}  # built-in members only, not plugin platforms
+    return frozenset((attended | messaging | _DEPLOYMENT_OWNER_SURFACES) - _MACHINE_TRANSPORTS - _MACHINE_SOURCES)
+
+
+def _session_env(name: str) -> str:
+    """Session-scoped value first (gateway contextvars), then the process environment."""
+    with contextlib.suppress(Exception):
+        from gateway.session_context import get_session_env
+        return str(get_session_env(name, "") or "").strip()
+    return os.environ.get(name, "").strip()
+
+
 def _machine_origin(platform: Optional[str], agent_context: Optional[str] = "") -> str:
     """Why this session was started by a machine, or "" for a session a person drives.
 
     One rule on the session origin, decided once per session: never store a machine-started session's
-    turns as the user's words. Fails closed: when the origin cannot be read, the session counts as machine."""
+    turns as the user's words. Fails closed: only a recognized owner surface stores; an unreadable, unknown
+    or non-interactive origin counts as machine."""
     if _is_kanban_worker():
         return "kanban-worker"
     context = str(agent_context or "").strip().lower()
@@ -101,6 +135,12 @@ def _machine_origin(platform: Optional[str], agent_context: Optional[str] = "") 
         return f"agent_context={context}"
     if os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT", "").strip():
         return "delegated-child"
+    # A finite `hermes chat -q` / oneshot / `hermes -z` run, whatever source label it carries or inherits
+    # (core keeps an explicit or messaging label; that label classifies history, it does not prove a person).
+    if _session_env("HERMES_SINGLE_QUERY_SESSION") == "1":
+        return "single-query"
+    if _session_env("HERMES_CRON_SESSION").lower() in {"1", "true", "yes", "on"}:
+        return "cron-session"
     raw_platform = str(platform or "").strip().lower()
     if raw_platform in _MACHINE_SOURCES:
         return f"platform={raw_platform}"
@@ -118,6 +158,8 @@ def _machine_origin(platform: Optional[str], agent_context: Optional[str] = "") 
         return "origin-unknown"
     if source in machine:
         return f"source={source}"
+    if source not in _owner_surfaces():
+        return f"not-owner-surface={source}"
     return ""
 
 
