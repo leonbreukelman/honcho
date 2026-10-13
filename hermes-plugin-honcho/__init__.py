@@ -45,7 +45,15 @@ _INTERNAL_GATEWAY_TURN_RE = re.compile(
     r"\[Your active task list was preserved across context compression\]|"
     r"\[IMPORTANT: Background process \d+ matched watch pattern[^\n]*|"
     r"A background fan-out of \d+ subagent\(s\) you dispatched earlier has finished\.|"
-    r"A background subagent you dispatched earlier has finished\."
+    r"A background subagent you dispatched earlier has finished\.|"
+    # Kanban dispatcher prompt that starts every worker run (hermes_cli/kanban_db_dispatch.py).
+    r"work kanban task t_[0-9a-z]+\b|"
+    # Kanban notices: the gateway wake turn ("[kanban] Task t_x completed.") and the TUI poller / ping
+    # line ("✔ [board] @assignee Kanban t_x done — ..."; status glyph, board and assignee optional).
+    r"\[kanban\] Task t_[0-9a-z]+ |"
+    r"(?:✔|⏸|✖|⏱|🔄|👀|🛑|⛔)\ufe0f?\s+(?:\[[^\]\n]+\]\s+)?(?:@\S+\s+)?Kanban t_[0-9a-z]+\b|"
+    # /goal loop continuation prompts (hermes_cli/goals.py).
+    r"\[Continuing toward your standing goal"
     r")",
     re.IGNORECASE,
 )
@@ -54,6 +62,12 @@ _INTERNAL_GATEWAY_TURN_RE = re.compile(
 def _is_internal_gateway_turn(text: str) -> bool:
     """Return True for machine-generated gateway/delegation notifications."""
     return bool(_INTERNAL_GATEWAY_TURN_RE.match(text or ""))
+
+
+def _is_kanban_worker() -> bool:
+    """A Kanban worker run: the dispatcher sets HERMES_KANBAN_TASK. Its turns come from the
+    dispatcher and the worker's own loop, not from the human, so they are never the user's words."""
+    return bool(os.environ.get("HERMES_KANBAN_TASK", "").strip())
 
 
 def _cfg_usable(cfg) -> bool:
@@ -777,6 +791,9 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             return
         if _is_internal_gateway_turn(user_content):
             logger.debug("Honcho sync skipped machine-generated gateway turn")
+            return
+        if _is_kanban_worker():
+            logger.debug("Honcho sync skipped a Kanban worker turn (dispatcher-authored, not the user's words)")
             return
         if not self._ready_or_kick_init():
             return
