@@ -104,7 +104,11 @@ _MESSAGING_FALLBACK = frozenset({
     "telegram", "discord", "whatsapp", "whatsapp_cloud", "slack", "signal", "mattermost", "matrix", "email",
     "sms", "dingtalk", "feishu", "wecom", "weixin", "bluebubbles", "qqbot", "yuanbao",
 })
-_MACHINE_TRANSPORTS = frozenset({"local", "api_server", "webhook", "msgraph_webhook", "wecom_callback", "relay"})
+# "buzz" (dokimos-workspace#407, ADR-0017): the Buzz room is a shared room with peer agents (Grok Bot, Claude).
+# Its turns are never Leon's words. Buzz is a plugin platform, so it is already outside _owner_surfaces() today
+# (only built-in Platform members count); naming it here keeps that true if core ever makes it a built-in member.
+_MACHINE_TRANSPORTS = frozenset({"local", "api_server", "webhook", "msgraph_webhook", "wecom_callback", "relay",
+                                 "buzz"})
 _DEPLOYMENT_OWNER_SURFACES = frozenset({"voice"})
 
 
