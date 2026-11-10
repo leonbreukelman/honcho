@@ -557,7 +557,9 @@ def test_honcho_sync_turn_does_not_suppress_genuine_user_messages():
         "When you see PRIOR CONTEXT, treat it carefully",
         "I want to know about your task list",
         "IMPORTANT: Background process — can you explain what that means?",
-        "[IMPORTANT: Background process — what does that mean?]",
+        # Local patch (dokimos-workspace#156 W03): any turn starting with the bracketed
+        # "[IMPORTANT: Background process " notice prefix is treated as a machine notice
+        # (fail closed), so the upstream bracketed sample is not a genuine-message case here.
         "Can we set up a group chat with the other bots tomorrow?",
         'the log line [Group chat: "Skill Handoff"] showed up mid-sentence in my notes',
         "Can we have a discussion with the other bots tomorrow?",
@@ -589,6 +591,7 @@ def test_honcho_sync_turn_does_not_suppress_genuine_user_messages():
         provider._manager = Manager()
         provider._session_key = "test-session"
         provider._session_initialized = True
+        provider._machine_origin = ""  # owner-started session (local session-origin guard)
 
         provider.sync_turn(msg, "assistant reply")
 
@@ -645,6 +648,7 @@ def test_honcho_sync_turn_same_instance_config_flip_gates_writes():
     provider._manager = Manager()
     provider._session_key = "test-session"
     provider._session_initialized = True
+    provider._machine_origin = ""  # owner-started session (local session-origin guard)
 
     # enabled -> write happens
     provider.sync_turn("user turn", "assistant reply")

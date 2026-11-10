@@ -229,6 +229,7 @@ class TestConcludeToolDispatch:
         provider._manager = MagicMock()
         provider._cron_skipped = False
         provider._config = SimpleNamespace(message_max_chars=25000)
+        provider._machine_origin = ""  # owner-started session (local session-origin guard)
 
         session = MagicMock()
         provider._manager.get_or_create.return_value = session

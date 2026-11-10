@@ -26,6 +26,7 @@ def _provider(a2a_sessions: bool = True) -> HonchoMemoryProvider:
     provider._manager.get_or_create.return_value = MagicMock()
     provider._cron_skipped = False
     provider._session_initialized = True
+    provider._machine_origin = ""  # owner-started session (local session-origin guard)
     provider._config = SimpleNamespace(message_max_chars=25000, a2a_sessions=a2a_sessions)
     return provider
 

@@ -18,6 +18,7 @@ def _provider(save_messages: bool) -> HonchoMemoryProvider:
     p._manager = MagicMock()
     p._session_key = 'test-session'
     p._session_initialized = True
+    p._machine_origin = ""  # owner-started session (local session-origin guard)
     return p
 
 
